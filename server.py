@@ -4,6 +4,8 @@ import asyncio
 import logging
 import requests as req
 from aiohttp import web
+import secrets
+from datetime import datetime, timedelta
 
 # ── CONFIG ──────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -37,23 +39,10 @@ def tg_send(chat_id, text):
     except Exception as e:
         log.error(f"Error enviando mensaje: {e}")
 
-def tg_get_updates(offset=None):
-    try:
-        params = {"timeout": 30, "allowed_updates": ["message"]}
-        if offset:
-            params["offset"] = offset
-        r = req.get(f"{TG_API}/getUpdates", params=params, timeout=35)
-        return r.json().get("result", [])
-    except:
-        return []
-
 # ── CLIENTES CONECTADOS ──────────────────────────────────
-clientes = {}  # token → websocket
+clientes = {}
 
 # ── COMANDOS ─────────────────────────────────────────────
-import secrets
-from datetime import datetime, timedelta
-
 def generar_token():
     return secrets.token_hex(8).upper()
 
@@ -93,8 +82,8 @@ def procesar_comando(chat_id, texto):
             tg_send(chat_id, "Sin licencias. Usá /nuevo NOMBRE"); return
         msg = "📋 *LICENCIAS:*\n\n"
         for token, lic in db["licencias"].items():
-            online  = "🟢 ONLINE" if token in clientes else "⚫ OFFLINE"
-            estado  = "✅" if lic["activa"] else "🔴"
+            online = "🟢 ONLINE" if token in clientes else "⚫ OFFLINE"
+            estado = "✅" if lic["activa"] else "🔴"
             msg += f"{estado} *{lic['nombre']}*\n`{token}`\n{online} | Vence: {lic['vence'][:10]}\n\n"
         tg_send(chat_id, msg)
 
@@ -120,8 +109,6 @@ def procesar_comando(chat_id, texto):
         db["licencias"][token]["activa"] = False
         db_guardar(db)
         nombre = db["licencias"][token]["nombre"]
-        if token in clientes:
-            asyncio.create_task(clientes[token].send_str(json.dumps({"tipo": "licencia_desactivada"})))
         tg_send(chat_id, f"🔴 Licencia de *{nombre}* desactivada.")
 
     elif cmd == "/borrar":
@@ -143,23 +130,21 @@ def procesar_comando(chat_id, texto):
         online  = len(clientes)
         tg_send(chat_id, f"📊 *ESTADO*\n\nLicencias: {total}\nActivas: {activas}\nOnline: {online}")
 
-# ── POLLING DE TELEGRAM EN BACKGROUND ───────────────────
-async def telegram_polling():
-    offset = None
-    log.info("Iniciando polling de Telegram...")
-    while True:
-        try:
-            updates = await asyncio.get_event_loop().run_in_executor(None, lambda: tg_get_updates(offset))
-            for update in updates:
-                offset = update["update_id"] + 1
-                msg = update.get("message", {})
-                chat_id = msg.get("chat", {}).get("id")
-                texto   = msg.get("text", "")
-                if chat_id and texto:
-                    procesar_comando(chat_id, texto)
-        except Exception as e:
-            log.error(f"Error polling: {e}")
-            await asyncio.sleep(5)
+# ── WEBHOOK DE TELEGRAM (recibe mensajes del bot) ────────
+async def handle_telegram(request):
+    try:
+        data = await request.json()
+    except:
+        return web.Response(status=400)
+    
+    msg     = data.get("message", {})
+    chat_id = msg.get("chat", {}).get("id")
+    texto   = msg.get("text", "")
+    
+    if chat_id and texto:
+        procesar_comando(chat_id, texto)
+    
+    return web.Response(text="ok")
 
 # ── WEBHOOK TRADINGVIEW ──────────────────────────────────
 async def handle_webhook(request):
@@ -226,20 +211,17 @@ async def handle_ws(request):
                 tg_send(ADMIN_ID, f"🟢 *{lic['nombre']}* se conectó")
 
     if token_cliente and token_cliente in clientes:
-        nombre = db_cargar()["licencias"].get(token_cliente, {}).get("nombre", token_cliente)
         del clientes[token_cliente]
-        log.info(f"Cliente desconectado: {nombre}")
 
     return ws
 
 # ── MAIN ─────────────────────────────────────────────────
 async def main():
     app = web.Application()
+    app.router.add_post("/telegram", handle_telegram)
     app.router.add_post("/webhook", handle_webhook)
     app.router.add_get("/ws", handle_ws)
     app.router.add_get("/", lambda r: web.Response(text="MaxBot OK"))
-
-    asyncio.create_task(telegram_polling())
 
     runner = web.AppRunner(app)
     await runner.setup()
