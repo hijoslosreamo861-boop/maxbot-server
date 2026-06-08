@@ -148,7 +148,7 @@ async def handle_telegram(request):
 
 # ── WEBHOOK TRADINGVIEW ──────────────────────────────────
 async def handle_webhook(request):
-    key = request.headers.get("x-admin-key", "")
+    key = request.headers.get("x-admin-key", "") or request.rel_url.query.get("key", "")
     if key != ADMIN_KEY:
         return web.Response(status=401, text="No autorizado")
     try:
